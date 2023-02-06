@@ -1,0 +1,335 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+library(dplyr)
+library(quantmod)
+library(xts)
+library(zoo,warn.conflicts=FALSE)
+library(lubridate,warn.conflicts=FALSE)
+library(mgcv,warn.conflicts=FALSE)
+library(rugarch,warn.conflicts=FALSE)
+library(data.table)
+library(vars)
+library(stats)
+library(tseries)
+library(aod)
+library(forecast)
+library(urca)
+```
+
+
+```{r}
+## load the data
+cpi <- read.csv("/Users/elaine/Downloads/CPIAUCSL.csv", head = TRUE)
+wti <- read.csv("/Users/elaine/Downloads/MCOILWTICO.csv", hea=TRUE)
+uer <- read.csv("/Users/elaine/Downloads/UNRATE.csv", head = T, stringsAsFactors=F)
+data <- read.csv("/Users/elaine/Downloads/QData-1.csv", head = T, stringsAsFactors=F)
+getSymbols("^DJI",src="yahoo")
+
+## extract the date and aggregate to quarterly for DJIA
+mydates = row.names(as.data.frame(DJI))
+mydates <- as.Date(mydates, "%Y-%m-%d")
+mydates <- floor_date(mydates, "quarter")
+dji <- Cl(DJI)
+dji <- aggregate(x=dji, by = list(mydates), FUN = mean)
+
+date.quarter <- as.Date(data[,1],"%m/%d/%Y")
+
+## extract the date and aggregate to quarterly for cpi, wti, uer
+date.month <- as.Date(uer$DATE,"%Y-%m-%d")
+date.month <- floor_date(date.month, "quarter")
+cpi.agg <- aggregate(x=cpi$CPIAUCSL, by = list(date.month), FUN = mean)
+wti.agg <- aggregate(x=wti$MCOILWTICO, by = list(date.month), FUN = mean)
+uer.agg <- aggregate(x=uer$UNRATE, by = list(date.month), FUN = mean)
+```
+
+
+```{r}
+## generate time series data
+gdp.ts <- xts(data$GDP, date.quarter)
+gdp.ts <- gdp.ts[193:nrow(gdp.ts)]
+date.month <- date.month[seq(1,183,3)]
+dji.ts <- xts(dji[1:61], date.month)
+cpi.ts <- xts(cpi.agg$x, date.month)
+wti.ts <- xts(wti.agg$x, date.month)
+uer.ts <- xts(uer.agg$x, date.month)
+colnames(dji.ts) <- c('dji.ts')
+
+## merge ts data into multivariate ts
+ts.merge <- merge(dji.ts, gdp.ts, join='inner')
+ts.merge <- merge(ts.merge, cpi.ts, join = 'inner')
+ts.merge <- merge(ts.merge, wti.ts, join = 'inner')
+ts.merge <- merge(ts.merge, uer.ts, join = 'inner')
+
+
+## differenced time series data
+gdp.dif <- (diff(ts.merge$gdp.ts)/ ts.merge$gdp.ts[-length(ts.merge$gdp.ts)])[-1]
+dji.dif <- (diff(ts.merge$dji.ts)/ ts.merge$dji.ts[-length(ts.merge$dji.ts)])[-1]
+cpi.dif <- (diff(ts.merge$cpi.ts)/ ts.merge$cpi.ts[-length(ts.merge$cpi.ts)])[-1]
+wti.dif <- (diff(ts.merge$wti.ts)/ ts.merge$wti.ts[-length(ts.merge$wti.ts)])[-1]
+uer.dif <- (diff(ts.merge$uer.ts)/ ts.merge$uer.ts[-length(ts.merge$uer.ts)])[-1]
+dif.merge <- merge(dji.dif, gdp.dif, join='inner')
+dif.merge <- merge(dif.merge, cpi.dif, join='inner')
+dif.merge <- merge(dif.merge, wti.dif, join='inner')
+dif.merge <- merge(dif.merge, uer.dif, join='inner')
+plot(dif.merge, main='Return Data of All Time Series')
+addLegend(legend.loc='bottomright', legend.names = c('DJIA', 'GDP','CPI','WTI','UER'),lwd = 5)
+
+merge3 <- merge(dji.dif, gdp.dif, join='inner')
+merge3 <- merge(merge3, cpi.dif)
+plot(merge3, main='Comparison of DJIA, GDP, and CPI')
+addLegend(legend.loc='bottomright', legend.names = c('DJIA', 'GDP','CPI'),lwd = 5)
+
+```
+
+```{r}
+## acf plot for each differenced ts data
+#par(oma=c(6,6,6,2))
+acf(dji.dif,lwd=1)
+acf(gdp.dif)
+acf(cpi.dif)
+acf(wti.dif)
+acf(uer.dif)
+
+```
+
+```{r}
+## split data into training and testing set, we remain 4 quarters to be predicted
+n = length(dji.dif)
+nfit = n-4
+dji.train <- dji.dif[1:nfit]
+gdp.train <- gdp.dif[1:nfit]
+cpi.train <- cpi.dif[1:nfit]
+wti.train <- wti.dif[1:nfit]
+uer.train <- uer.dif[1:nfit]
+
+dji.test <- dji.dif[(nfit+1):n]
+gdp.test <- gdp.dif[(nfit+1):n]
+cpi.test <- cpi.dif[(nfit+1):n]
+wti.test <- wti.dif[(nfit+1):n]
+uer.test <- uer.dif[(nfit+1):n]
+
+## VAR Model
+var.train <- cbind(dji.train,gdp.train,cpi.train,wti.train,uer.train)
+VARselect(var.train, lag.max = 20)
+var.aic <- VAR(var.train,p=7)
+## aic select p=6
+
+dji.coef <- coefficients(var.aic)$dji.train[-(5*7+1),1]
+dji.vr <- vcov(var.aic)[c(2:36),c(2:36)]
+
+gdp.coef <- coefficients(var.aic)$gdp.train[-(5*7+1),1]
+gdp.vr <- vcov(var.aic)[c(38:72),c(38:72)]
+
+cpi.coef <- coefficients(var.aic)$cpi.train[-(5*7+1),1]
+cpi.vr <- vcov(var.aic)[c(74:108),c(74:108)]
+
+wti.coef <- coefficients(var.aic)$wti.train[-(5*7+1),1]
+wti.vr <- vcov(var.aic)[c(110:144),c(110:144)]
+
+uer.coef <- coefficients(var.aic)$uer.train[-(5*7+1),1]
+uer.vr <- vcov(var.aic)[c(146:180),c(146:180)]
+
+wald.test(b=dji.coef, dji.vr,Terms = seq(1,35,1))
+wald.test(b=gdp.coef, gdp.vr,Terms = seq(1,35,1))
+wald.test(b=cpi.coef, cpi.vr,Terms = seq(1,35,1))
+wald.test(b=wti.coef, wti.vr,Terms = seq(1,35,1))
+wald.test(b=uer.coef, uer.vr,Terms = seq(1,35,1))
+```
+
+```{r}
+n_test = 4
+n= nrow(dji.dif)
+model = matrix(NA, n_test, 1)
+pred <- as.vector(predict(var.aic, n.ahead = n_test))
+
+# Rolling prediction model unrestricted
+for (i in 1:4){
+  nfit = n-(4-i+1)
+  train_tmp <- cbind(dji.dif[1:nfit],gdp.dif[1:nfit],cpi.dif[1:nfit],wti.dif[1:nfit],uer.dif[1:nfit])
+  model_tmp <- restrict(VAR(train_tmp, p = 4))
+  pred <- as.vector(predict(model_tmp, n.ahead = 1))
+  model[(i-1):(i)] = pred$fcst[[1]][, 1]
+}
+obs = as.matrix(dji.test)
+#MAPE
+mean(abs(model - obs)/abs(obs))
+#PM
+sum((model-obs)^2)/sum((obs-mean(obs))^2)
+```
+
+```{r}
+cor(dif.merge[(1:(n-1)),1],dif.merge[(2:n),5])
+```
+
+```{r}
+## co-integration dji-gdp
+dji_gdp <- lm(ts.merge$dji.ts~ts.merge$gdp.ts)
+summary(dji_gdp)
+gdp.lm.coef <- dji_gdp$coefficients
+lm.trgdp <- xts((gdp.lm.coef[2]*ts.merge[,2]+gdp.lm.coef[1]),date.quarter[193:250])
+coin.gdp <- merge(lm.trgdp, ts.merge$dji.ts)
+plot(coin.gdp)
+## test for co-integration
+adf.test(coin.gdp[,2]-coin.gdp[,1])
+## test for co-integration
+summary(ur.df((coin.gdp[,2]-coin.gdp[,1]), type="none",selectlags="BIC"))
+summary(ur.df((coin.gdp[,2]-coin.gdp[,1]), type="drift",selectlags="BIC"))
+summary(ur.df((coin.gdp[,2]-coin.gdp[,1]), type="trend",selectlags="BIC"))
+
+n = nrow(lm.trgdp)
+nfit = n-4
+
+outpred.10 = NULL
+for(i in 1:4){
+   nfit = n-(4-i+1)
+   pred.model = lm(ts.merge$dji.ts[1:nfit]~ts.merge$gdp.ts[1:nfit])
+   coef <- pred.model$coefficients
+   pred <- coef[2]*ts.merge[(nfit+1),2]+coef[1]
+   outpred.10 = c(outpred.10,pred)
+   #ubound.10 = c(ubound.10, pred.1$pred+1.96*pred.1$se)
+   #lbound.10 = c(lbound.10, pred.1$pred-1.96*pred.1$se)
+}
+outpred.10 <- xts(outpred.10, date.quarter[(length(date.quarter)-3):length(date.quarter)])
+plot(ts.merge$dji.ts[40:58], main='Co-intergration Analysis DJIA-GDP')
+points(outpred.10,col='red')
+test <- ts.merge$dji.ts[55:58]
+#MAPE
+mean(abs(outpred.10 - test$dji.ts)/abs(test$dji.ts))
+#PM
+sum((outpred.10-test$dji.ts)^2)/sum((test$dji.ts-mean(test$dji.ts))^2)
+```
+
+```{r}
+## co-integration dji-cpi
+dji_cpi <- lm(ts.merge$dji.ts~ts.merge$cpi.ts)
+summary(dji_cpi)
+cpi.lm.coef <- dji_cpi$coefficients
+lm.trcpi <- xts((cpi.lm.coef[2]*ts.merge[,3]+cpi.lm.coef[1]),date.month[1:(length(date.month)-3)])
+coin.cpi <- merge(lm.trcpi, ts.merge$dji.ts)
+plot(ts.merge$dji.ts)
+plot(lm.trcpi)
+plot(coin.cpi)
+## test for co-integration
+adf.test(coin.cpi[,2]-coin.cpi[,1])
+## test for co-integration
+summary(ur.df((coin.cpi[,2]-coin.cpi[,1]), type="none",selectlags="BIC"))
+summary(ur.df((coin.cpi[,2]-coin.cpi[,1]), type="drift",selectlags="BIC"))
+summary(ur.df((coin.cpi[,2]-coin.cpi[,1]), type="trend",selectlags="BIC"))
+
+n = nrow(lm.trcpi)
+nfit = n-4
+
+outpred.10 = NULL
+for(i in 1:4){
+   nfit = n-(4-i+1)
+   pred.model = lm(ts.merge$dji.ts[1:nfit]~ts.merge$cpi.ts[1:nfit])
+   coef <- pred.model$coefficients
+   pred <- coef[2]*ts.merge[(nfit+1),3]+coef[1]
+   outpred.10 = c(outpred.10,pred)
+   #ubound.10 = c(ubound.10, pred.1$pred+1.96*pred.1$se)
+   #lbound.10 = c(lbound.10, pred.1$pred-1.96*pred.1$se)
+}
+outpred.10 <- xts(outpred.10, date.quarter[(length(date.quarter)-3):length(date.quarter)])
+plot(ts.merge$dji.ts[40:58], main='Co-intergration Analysis DJIA-CPI')
+points(outpred.10,col='red')
+test <- ts.merge$dji.ts[55:58]
+#MAPE
+mean(abs(outpred.10 - test$dji.ts)/abs(test$dji.ts))
+#PM
+sum((outpred.10-test$dji.ts)^2)/sum((test$dji.ts-mean(test$dji.ts))^2)
+```
+```{r}
+## co-integration dji-wti
+dji_wti <- lm(ts.merge$dji.ts~ts.merge$wti.ts)
+summary(dji_wti)
+wti.lm.coef <- dji_wti$coefficients
+lm.trwti <- xts((wti.lm.coef[2]*ts.merge[,4]+wti.lm.coef[1]),date.month[1:(length(date.month)-3)])
+coin.wti <- merge(lm.trwti, ts.merge$dji.ts)
+plot(ts.merge$dji.ts)
+plot(lm.trwti)
+plot(coin.wti)
+## test for co-integration
+adf.test(coin.wti[,2]-coin.wti[,1])
+## test for co-integration
+summary(ur.df((coin.wti[,2]-coin.wti[,1]), type="none",selectlags="BIC"))
+summary(ur.df((coin.wti[,2]-coin.wti[,1]), type="drift",selectlags="BIC"))
+summary(ur.df((coin.wti[,2]-coin.wti[,1]), type="trend",selectlags="BIC"))
+```
+
+```{r}
+## co-integration dji-uer
+dji_uer <- lm(ts.merge$dji.ts~ts.merge$uer.ts)
+summary(dji_uer)
+uer.lm.coef <- dji_uer$coefficients
+lm.truer <- xts((uer.lm.coef[2]*ts.merge[,5]+uer.lm.coef[1]),date.month[1:(length(date.month)-3)])
+coin.uer <- merge(lm.truer, ts.merge$dji.ts)
+plot(ts.merge$dji.ts)
+plot(lm.truer)
+plot(coin.uer)
+## test for co-integration
+adf.test(coin.uer[,2]-coin.uer[,1])
+## test for co-integration
+summary(ur.df((coin.uer[,2]-coin.uer[,1]), type="none",selectlags="BIC"))
+summary(ur.df((coin.uer[,2]-coin.uer[,1]), type="drift",selectlags="BIC"))
+summary(ur.df((coin.uer[,2]-coin.uer[,1]), type="trend",selectlags="BIC"))
+
+
+```
+
+```{r}
+## Fit VECM
+library(dynlm)
+
+## dji-gdp
+tsdji <-as.numeric(coin.gdp[,2])
+tsgdp <- as.numeric(coin.gdp[,1])
+## Set Error Correction Term
+tsdif <- tsdji[-1]-tsgdp[-1]
+VECM_gdp <- dynlm(d(tsdji) ~ L(d(tsdji), 1) + L(d(tsgdp), 1) +  L(tsdif))
+names(VECM_gdp$coefficients) <- c("Intercept", "D_dji_l1","D_gdp_l1", "ect_l1")
+coeftest(VECM_gdp, vcov. = NeweyWest(VECM_gdp, prewhite = F, adjust = T))
+```
+
+
+```{r}
+## dji-cpi
+tsdji <-as.numeric(coin.cpi[,2])
+tscpi <- as.numeric(coin.cpi[,1])
+## Set Error Correction Term
+tsdif <- tsdji[-1]-tscpi[-1]
+VECM_cpi <- dynlm(d(tsdji) ~ L(d(tsdji), 1) + L(d(tscpi), 1) +  L(tsdif))
+names(VECM_cpi$coefficients) <- c("Intercept", "D_dji_l1","D_cpi_l1", "ect_l1")
+coeftest(VECM_cpi, vcov. = NeweyWest(VECM_cpi, prewhite = F, adjust = T))
+```
+
+```{r}
+## dji-wti
+tsdji <-as.numeric(coin.wti[,2])
+tswti <- as.numeric(coin.wti[,1])
+## Set Error Correction Term
+tsdif <- tsdji[-1]-tswti[-1]
+VECM_wti <- dynlm(d(tsdji) ~ L(d(tsdji), 1) + L(d(tswti), 1) +  L(tsdif))
+names(VECM_wti$coefficients) <- c("Intercept", "D_dji_l1","D_wti_l1", "ect_l1")
+coeftest(VECM_wti, vcov. = NeweyWest(VECM_wti, prewhite = F, adjust = T))
+```
+```{r}
+## dji-uer
+tsdji <-as.numeric(coin.uer[,2])
+tsuer <- as.numeric(coin.uer[,1])
+## Set Error Correction Term
+tsdif <- tsdji[-1]-tsuer[-1]
+VECM_uer <- dynlm(d(tsdji) ~ L(d(tsdji), 1) + L(d(tsuer), 1) +  L(tsdif))
+names(VECM_uer$coefficients) <- c("Intercept", "D_dji_l1","D_uer_l1", "ect_l1")
+coeftest(VECM_uer, vcov. = NeweyWest(VECM_uer, prewhite = F, adjust = T))
+
+```
+
